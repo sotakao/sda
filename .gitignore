@@ -158,3 +158,38 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# --- SDA experiment artifacts ---
+
+# Media & archives you don't want in git
+*.mp4
+*.gif
+*.zip
+*.png
+*.nc   # e.g., inference_results.nc
+
+# Generated outputs/results
+experiments/**/output/**
+experiments/**/results/**
+
+# All "runs" directories from experiments & top-level
+runs_sqg/**
+experiments/**/runs_sqg/**
+experiments/**/runs_*/**
+
+# Training figures & histories
+**/figures/**
+**/history/**
+
+# Checkpoints (belt & suspenders; you already ignore many)
+runs_sqg/**/checkpoints/**
+experiments/**/checkpoints/**
+
+# --- SLURM logs (root and nested) ---
+slurm/
+slurm-*.out
+slurm-*.err
+**/slurm/*.out
+**/slurm/*.err
+**/slurm/**/*.out
+**/slurm/**/*.err
