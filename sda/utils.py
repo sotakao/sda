@@ -13,7 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import trange
 from typing import *
 
-from .score import *
+from .score import VPSDE
 
 
 ACTIVATIONS = {
@@ -261,3 +261,4 @@ def mmd(
         mmd = mmd + kxx.mean() + kyy.mean() - 2 * kxy.mean()
 
     return mmd
+

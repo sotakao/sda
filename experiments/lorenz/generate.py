@@ -1,11 +1,15 @@
 #!/usr/bin/env python
 
 import h5py
+import sys
 
 from dawgz import job, after, schedule
 from typing import *
 
 from utils import *
+
+from pathlib import Path
+PATH = Path(__file__).resolve().parent
 
 
 @job(cpus=1, ram='1GB', time='00:05:00')
