@@ -567,11 +567,10 @@ class DPSGaussianScore(nn.Module):
             var = self.std ** 2 + self.gamma * (sigma / mu) ** 2
 
             if self.scale:
-                dim = tuple(range(1, err.ndim))
-                log_p = -torch.linalg.vector_norm(err, dim=dim)
+                log_p = -torch.linalg.vector_norm(err)
             else:
                 log_p = -(err ** 2 / var).sum() / 2
-
+        # import pdb; pdb.set_trace()
         s, = torch.autograd.grad(log_p, x)
 
         return eps - self.guidance_strength * sigma * s
@@ -713,7 +712,8 @@ class MMPSGaussianScore(nn.Module):
         std: Union[float, Tensor],
         sde: VPSDE,
         solver: str="gmres",
-        iterations: int=1,        
+        iterations: int=1,  
+        guidance_strength: float = 1.0
     ):
         super().__init__()
 
@@ -726,6 +726,7 @@ class MMPSGaussianScore(nn.Module):
             self.solver = partial(cg, iterations=iterations)
         elif solver == "gmres":
             self.solver = partial(gmres, iterations=iterations)
+        self.guidance_strength = guidance_strength
 
     def forward(self, x: Tensor, t: Tensor, c: Tensor = None) -> Tensor:
         mu, sigma = self.sde.mu(t), self.sde.sigma(t)
@@ -755,7 +756,7 @@ class MMPSGaussianScore(nn.Module):
             grad = self.y - y_hat
             grad = self.solver(A=cov_y, b=grad)
             grad = torch.autograd.grad(y_hat, x, grad)[0]
-            return eps - sigma * grad
+            return eps - self.guidance_strength * sigma * grad
         
         #     var = self.std ** 2 + self.gamma * (sigma / mu) ** 2
 

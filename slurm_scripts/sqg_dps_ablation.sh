@@ -1,89 +1,80 @@
 #!/bin/bash
-#SBATCH -J sqg_ablate
-#SBATCH --array=0-71
+#
+# Save as: submit_inference_grid.sbatch
+# Submit with: sbatch submit_inference_grid.sbatch
+#
+# Total runs: 5 (guidance_strength) * 3 (steps) * 3 (corrections) = 45
+
+#SBATCH --job-name=SQG_A3_DPS_Sweep
+#SBATCH --time=1-00:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH --time=08:00:00
-# #SBATCH --partition=gpu                # ← uncomment & set if you need GPUs
-# #SBATCH --gres=gpu:1                   # ← uncomment if you need a GPU
-#SBATCH -o slurm-%x-%A_%a.out
-#SBATCH -e slurm-%x-%A_%a.err
-#SBATCH --requeue
+#SBATCH --mem=6G
+#SBATCH --mail-user=sotakao@caltech.edu
+#SBATCH --mail-type=BEGIN,END,FAIL
 
-set -euo pipefail
+# --- Choose partition / GPUs as needed ---
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
+# If CPU only, comment the two lines above and uncomment this:
+# #SBATCH --partition=cpu
 
-### --- ENVIRONMENT ---
-source ~/.bashrc
-conda activate sda
+# --- Job array over all parameter combinations (0..44) ---
+#SBATCH --array=0-44%5
 
-# Optional: keep WandB happy on clusters
-export WANDB__SERVICE_WAIT=300
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+# --- Optional: log files ---
+#SBATCH -o slurm/%x-%A_%a.out
+#SBATCH -e slurm/%x-%A_%a.err
 
-### --- FIXED ARGS (edit as needed) ---
-DATA_DIR="/central/scratch/sotakao/sqg_train_data"
-TRAIN_FILE="sqg_pv_train.h5"
-HRLY_FREQ=3
-N_ENS=5
-LOG_WANDB=1
-GUIDANCE_METHOD=DPS
+set -eo pipefail
+echo "[START] $(date) job=$SLURM_JOB_ID task=${SLURM_ARRAY_TASK_ID:-NA}" 1>&2
 
-### --- SWEEP SPACE ---
-# NOTE: To achieve 72 total runs, we use three guidance strengths.
-OBS_PCTS=(0.05 0.25)                 # 2
-OBS_FNS=(linear arctan15)            # 2
-GUIDE_STRENGTHS=(0.01 0.1 0.5 1.0)        # 4  ← if you really want only (0.1, 1.0), change here (will make 48 runs)
-CORRECTIONS=(0 1 2)                  # 3
+# --- Ensure log directory exists ---
+mkdir -p slurm
 
-N1=${#OBS_PCTS[@]}           # 2
-N2=${#OBS_FNS[@]}            # 2
-N3=${#GUIDE_STRENGTHS[@]}    # 3
-N4=${#CORRECTIONS[@]}        # 3
+# --- Environment setup ---
+source /groups/astuart/sotakao/miniconda3/etc/profile.d/conda.sh
+conda activate /groups/astuart/sotakao/miniconda3/envs/sda
+cd /resnick/groups/astuart/sotakao/score-based-ensemble-filter/sda/experiments/sqg
 
-TOTAL=$((N1*N2*N3*N4))
-if [[ ${SLURM_ARRAY_TASK_ID} -ge ${TOTAL} ]]; then
-  echo "Array index ${SLURM_ARRAY_TASK_ID} is out of range (0..$((TOTAL-1)))."
-  exit 1
-fi
+# ---------------- Grid definition ----------------
+# Indices:
+#   a = SLURM_ARRAY_TASK_ID in [0..44]
+#   gs_idx   = a % 5
+#   steps_idx= (a / 5) % 3
+#   corr_idx = (a / (5*3)) % 3
 
-# --- Mixed-radix decode of SLURM_ARRAY_TASK_ID into indices ---
-i=${SLURM_ARRAY_TASK_ID}
+GUIDES=(0.1 0.2 0.3 0.4 0.5)
+STEPSS=(100 250 500)
+CORRS=(0 1 2)
 
-i0=$(( i % N1 ));         i=$(( i / N1 ))
-i1=$(( i % N2 ));         i=$(( i / N2 ))
-i2=$(( i % N3 ));         i=$(( i / N3 ))
-i3=$(( i % N4 ));         # last one
+a=${SLURM_ARRAY_TASK_ID}
 
-OBS_PCT=${OBS_PCTS[$i0]}
-OBS_FN=${OBS_FNS[$i1]}
-GUIDANCE_STRENGTH=${GUIDE_STRENGTHS[$i3]}
-CORR=${CORRECTIONS[$i4]}
+gs_idx=$(( a % 5 ))
+steps_idx=$(( (a / 5) % 3 ))
+corr_idx=$(( (a / 15) % 3 ))
 
-# Nice, unique run name/ID for logs & wandb grouping
-RUN_TAG="pct${OBS_PCT}_fn${OBS_FN}_gm${GUIDANCE_METHOD}_gs${GUIDANCE_STRENGTH}_corr${CORR}"
-echo "[$(date)] Starting run ${RUN_TAG} (array id ${SLURM_ARRAY_TASK_ID}/${TOTAL})"
+GUIDE=${GUIDES[$gs_idx]}
+STEPS=${STEPSS[$steps_idx]}
+CORRECTIONS=${CORRS[$corr_idx]}
 
-# Optional: per-run output dir (python might also handle logging)
-OUTDIR="outputs/${SLURM_JOB_ID}/${SLURM_ARRAY_TASK_ID}_${RUN_TAG}"
-mkdir -p "${OUTDIR}"
+echo "[$(date)] Task ${SLURM_ARRAY_TASK_ID}: guidance_strength=${GUIDE}, steps=${STEPS}, corrections=${CORRECTIONS}"
 
-# If you want WandB grouping across the sweep:
-export WANDB_RUN_GROUP="sqg_ablate_${SLURM_JOB_ID}"
-export WANDB_RUN_NAME="${RUN_TAG}"
 
-# --- Launch ---
+# ---------------- Launch ----------------
 srun python inference2.py \
-  --data_dir "${DATA_DIR}" \
-  --train_file "${TRAIN_FILE}" \
-  --hrly_freq "${HRLY_FREQ}" \
-  --obs_pct "${OBS_PCT}" \
-  --obs_fn "${OBS_FN}" \
-  --n_ens "${N_ENS}" \
-  --log_wandb "${LOG_WANDB}" \
-  --corrections "${CORR}" \
-  --guidance_method "${GUIDANCE_METHOD}" \
-  --guidance_strength "${GUIDANCE_STRENGTH}" \
-  --run_tag "${RUN_TAG}" \
-  --out_dir "${OUTDIR}"
+    --data_dir /central/scratch/sotakao/sqg_train_data \
+    --train_file sqg_pv_train.h5 \
+    --hrly_freq 3 \
+    --obs_pct 0.25 \
+    --obs_fn arctan \
+    --obs_sigma 0.01 \
+    --n_ens 20 \
+    --log_wandb 1 \
+    --guidance_method DPS \
+    --guidance_strength "${GUIDE}" \
+    --corrections "${CORRECTIONS}" \
+    --steps "${STEPS}" \
 
-echo "[$(date)] Finished run ${RUN_TAG}"
+echo "[$(date)] Done."

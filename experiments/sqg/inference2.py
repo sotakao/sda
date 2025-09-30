@@ -119,7 +119,8 @@ def main():
     rng = np.random.RandomState(42)
 
     # ---- Data ----
-    test_file = Path(args.data_dir) / f"{args.hrly_freq}hrly" / f"sqg_N64_{args.hrly_freq}hrly_100.nc"
+    # test_file = Path(args.data_dir) / f"{args.hrly_freq}hrly" / f"sqg_N64_{args.hrly_freq}hrly_100.nc"
+    test_file = f"/resnick/groups/astuart/sotakao/score-based-ensemble-filter/EnSFInpainting/data/test/sqg_N64_{args.hrly_freq}hrly_100.nc"
     nc_truth = NetCDFDataset(test_file, 'r')
     pv_truth_nc = nc_truth.variables['pv']  # (T, 2, ny, nx)
     T, Z, ny, nx = pv_truth_nc.shape
@@ -268,8 +269,8 @@ def main():
     if args.log_wandb:
         import wandb
         wandb.init(project=args.wandb_project, entity=args.wandb_entity,
-                   name=f"SDA_window{args.window}_{args.obs_fn}_{args.obs_pct}pct_{args.guidance_method}_{args.guidance_strength}"
-                        f"gamma{args.gamma}_steps{args.steps}_corr{args.corrections}_tau{args.tau}",
+                   name=f"SDA_{args.obs_fn}_{args.obs_pct}pct_{args.guidance_method}"
+                        f"_strength{args.guidance_strength}_em_steps{args.steps}_corr{args.corrections}",
                    config=vars(args))
 
         for t in range(T):
