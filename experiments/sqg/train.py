@@ -33,9 +33,11 @@ class LocalScoreUNet(ScoreUNet):
         self,
         channels: int,
         size: int = 64,
+        periodic: bool = False,
         **kwargs,
     ):
-        super().__init__(channels, 1, **kwargs)
+        # Pass periodic down to ScoreUNet/UNet
+        super().__init__(channels, 1, periodic=periodic, **kwargs)
 
         domain = 2 * torch.pi / size * (torch.arange(size) + 1 / 2)
         forcing = torch.sin(4 * domain).expand(1, size, size).clone()
@@ -53,6 +55,7 @@ def make_score(
     hidden_blocks: Tuple[int],
     kernel_size: int,
     activation: str,
+    periodic: bool = False,
     **absorb
 ) -> torch.nn.Module:
     
@@ -66,6 +69,7 @@ def make_score(
         kernel_size=kernel_size,
         activation=ACTIVATIONS[activation],
         spatial=2,
+        periodic=periodic,  # controls circular padding in UNet
         padding_mode='circular',
     )
     return score
@@ -83,6 +87,7 @@ def main():
     parser.add_argument("--hidden_blocks", type=int, nargs="+", default=[3, 3, 3], help="Hidden blocks for the model.")
     parser.add_argument("--kernel_size", type=int, default=3, help="Kernel size for the model.")
     parser.add_argument("--activation", type=str, default="SiLU", help="Activation function for the model.")
+    parser.add_argument("--periodic", action="store_true", help="Use periodic padding (circular) in UNet.")
     parser.add_argument("--epochs", type=int, default=4096, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training.")
     parser.add_argument("--learning_rate", type=float, default=2e-4, help="Learning rate for the optimizer.")
@@ -94,7 +99,7 @@ def main():
     # Setup directories
     out_root = Path("./runs_sqg")
     out_root.mkdir(parents=True, exist_ok=True)
-    exp_name = f"{args.hrly_freq}hrly_window_size_{args.window}_num_epochs_{args.epochs}"
+    exp_name = f"{args.hrly_freq}hrly_window_size_{args.window}_num_epochs_{args.epochs}_{'periodic' if args.periodic else 'aperiodic'}"  # UPDATED
     run_dir = out_root / exp_name
     ckpt_dir = run_dir / "checkpoints"
     fig_dir = run_dir / "figures"
@@ -133,6 +138,7 @@ def main():
         'hidden_blocks': tuple(args.hidden_blocks),
         'kernel_size': args.kernel_size,
         'activation': args.activation,
+        'periodic': args.periodic,  # NEW
         'epochs': args.epochs,
         'batch_size': args.batch_size,
         'learning_rate': args.learning_rate,
@@ -213,6 +219,26 @@ def main():
             flush_history(train_history, valid_history, lr_history, hist_dir, tag=f"epoch_{epoch:06d}")
             flush_history(train_history, valid_history, lr_history, hist_dir, tag="latest")
             save_samples_figure(sde, epoch=epoch, ts=(0, 3, 6, 9), steps=64, log_to_wandb=True)
+
+            # Save checkpoint with periodicity in the filename
+            ckpt_path = ckpt_dir / f"ckpt_epoch_{epoch:06d}_{'per' if args.periodic else 'aper'}.pt"
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state": sde.eps.state_dict(),  # LocalScoreUNet state
+                    "config": CONFIG,
+                },
+                ckpt_path,
+            )
+            latest_path = ckpt_dir / f"latest_{'per' if args.periodic else 'aper'}.pt"
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state": sde.eps.state_dict(),
+                    "config": CONFIG,
+                },
+                latest_path,
+            )
 
     # Final history save
     flush_history(train_history, valid_history, lr_history, hist_dir, tag="final")

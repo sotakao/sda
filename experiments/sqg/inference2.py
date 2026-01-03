@@ -80,6 +80,7 @@ def parse_args():
     p.add_argument("--obs_pct", type=float, default=0.05)
     p.add_argument("--obs_fn", type=str, default="linear")
     p.add_argument("--obs_sigma", type=float, default=0.3)
+    p.add_argument("--init_sigma", type=float, default=1.0)
     p.add_argument("--fixed_obs", action="store_true")
     p.add_argument("--n_ens", type=int, default=20)
     p.add_argument("--guidance_method", type=str, choices=["DPS", "DPS_scale", "MMPS"], default="DPS")
@@ -97,8 +98,9 @@ def parse_args():
     p.add_argument("--wandb_project", type=str, default="ScoreDA_SQG")
     p.add_argument("--wandb_entity", type=str, default="stima")
     p.add_argument("--plot_every", type=int, default=20)  # match assimilate.py behavior
-    # Debug
+    # Flags
     p.add_argument("--debug_parity", action="store_true", help="Print first-step invariants and exit.")
+    p.add_argument("--initial_condition", action="store_true", help="Add initial condition.")
     return p.parse_args()
 
 
@@ -143,7 +145,8 @@ def main():
         return mask
 
     obs_mask = make_obs_mask(ny, nx)                       # (ny, nx)
-    mask4d = obs_mask.view(1, 1, ny, nx)                   # broadcast over (B,L,C)
+    iy, ix = (obs_mask > 0.5).nonzero(as_tuple=True)    
+    # mask4d = obs_mask.repeat(T-1, 2, ny, nx)                   # broadcast over (B,L,C)
 
     # ---- Checkpoint ----
     if args.ckpt_path:
@@ -170,13 +173,47 @@ def main():
     score_obj.load_state_dict(payload["score_state"])
 
     # ---- A(x): PHYSICAL -> OBS (mask applied framewise) ----
-    def A_model(x):
-        # x: (B,L,C,H,W) in physical units (scalefact × PV)
-        return obs_fn(x) * mask4d
+    # def A_model(x):
+    #     # x: (B,L,C,H,W) in temperature units (scalefact × PV)
+    #     return obs_fn(x) * mask4d
 
-    # ---- Observations in OBS units (masked) ----
-    noise  = torch.randn_like(pv_truth) * args.obs_sigma
-    y_star = obs_fn(scalefact * pv_truth) * obs_mask + noise * obs_mask  # (T,2,H,W)
+    if args.initial_condition:
+        def A_model(x):
+            # expects x: (B,L,C,H,W) in temperature units (scalefact × PV)
+            B, L, C, H, W = x.shape
+            ic_vec = x[:, 0].flatten(start_dim=1)
+            x_obs = x[:, 1:, :, iy, ix]
+            x_obs_vec = x_obs.reshape(B, -1)
+            obs_part = obs_fn(x_obs_vec)
+
+            return torch.cat([ic_vec, obs_part], dim=1)
+
+        # ---- Observations in OBS units (masked) ----
+        # noise  = torch.randn_like(pv_truth) * args.obs_sigma
+        # y_star = obs_fn(scalefact * pv_truth) * obs_mask + noise * obs_mask  # (T,2,H,W)
+
+        x_phys_full = (scalefact * pv_truth).unsqueeze(0)      # (1,T,2,H,W)
+        y_clean_full = A_model(x_phys_full)                    # (1, M_full)
+        obs_sigma_full = args.obs_sigma * torch.ones_like(y_clean_full)
+
+         # Special (larger) noise for the IC portion (first N entries)
+        N = len(pv_truth[0, 0].flatten())
+        obs_sigma_full[:, :N] = args.init_sigma**2
+
+        eps_full = torch.randn_like(y_clean_full)              # fixed noise reused by prefixing
+        y_star = y_clean_full + obs_sigma_full * eps_full # (1, M_full)
+
+    else:
+        def A_model(x):
+            # expects x: (B,L,C,H,W) in temperature units (scalefact × PV)
+            B, L, C, H, W = x.shape
+            x_obs = x[:, 1:, :, iy, ix]
+            x_obs_vec = x_obs.reshape(B, -1)
+            return obs_fn(x_obs_vec)
+
+        y_star = A_model(scalefact * pv_truth[None])
+        y_star += torch.randn_like(y_star) * args.obs_sigma  # (T,2,H,W)
+
 
     # ---- Guided SDE (identical wiring) ----
     scale = (scalefact * pv_std).to(device)
@@ -209,15 +246,18 @@ def main():
             y_star,
             observation_fn=A_model,
             std=args.obs_sigma,
+            init_std=args.init_sigma,
             sde=ScaledVPSDE(score_scaled,
                             shape=(),
                             scale=scale,
             ),
+            guidance_strength=args.guidance_strength,
         )
+        
     guided_sde = ScaledVPSDE(
         eps=guided_eps,
         scale=scale,
-        shape=y_star.shape,
+        shape=(T, Z, ny, nx),
     ).to(device)
 
     # ---- Parity probe (prints invariants) ----

@@ -71,13 +71,14 @@ class ScoreUNet(nn.Module):
         channels: The number of channels.
         context: The number of context channels.
         embedding: The number of time embedding features.
+        periodic: Whether to use circular padding (periodic boundary conditions).
     """
 
-    def __init__(self, channels: int, context: int = 0, embedding: int = 64, **kwargs):
+    def __init__(self, channels: int, context: int = 0, embedding: int = 64, periodic: bool = False, **kwargs):
         super().__init__()
 
         self.embedding = TimeEmbedding(embedding)
-        self.network = UNet(channels + context, channels, embedding, **kwargs)
+        self.network = UNet(channels + context, channels, embedding, periodic=periodic, **kwargs)
 
     def forward(self, x: Tensor, t: Tensor, c: Tensor = None) -> Tensor:
         dims = self.network.spatial + 1
@@ -570,7 +571,7 @@ class DPSGaussianScore(nn.Module):
                 log_p = -torch.linalg.vector_norm(err)
             else:
                 log_p = -(err ** 2 / var).sum() / 2
-        # import pdb; pdb.set_trace()
+
         s, = torch.autograd.grad(log_p, x)
 
         return eps - self.guidance_strength * sigma * s
@@ -711,6 +712,7 @@ class MMPSGaussianScore(nn.Module):
         observation_fn: Callable[[Tensor], Tensor],
         std: Union[float, Tensor],
         sde: VPSDE,
+        init_std: Optional[Union[float, Tensor]]=None,
         solver: str="gmres",
         iterations: int=1,  
         guidance_strength: float = 1.0
@@ -719,6 +721,7 @@ class MMPSGaussianScore(nn.Module):
 
         self.register_buffer('y', y)
         self.register_buffer('std', torch.as_tensor(std))
+        self.init_std = torch.as_tensor(init_std) if init_std is not None else None
 
         self.observation_fn = observation_fn
         self.sde = sde
@@ -751,7 +754,16 @@ class MMPSGaussianScore(nn.Module):
                 return sigma**2/mu * torch.autograd.grad(x_, x, v, retain_graph=True)[0] 
 
             def cov_y(v):
-                return self.std**2 * v + A(cov_x(At(v)))
+                Sigma = self.std**2 * torch.ones(*v.shape, dtype=x.dtype, device=x.device)
+                if self.init_std is not None:
+                    N = len(x[0,0].flatten())
+                    if self.init_std.ndim == 0:
+                        Sigma[:,:N] = self.init_std**2 * torch.ones(v.shape[0], N, dtype=x.dtype, device=x.device)
+                    else:
+                        k = len(self.init_std)
+                        for j in range(k):
+                            Sigma[:,j*N:(j+1)*N] = self.init_std[j]**2 * torch.ones(v.shape[0], N, dtype=x.dtype, device=x.device)
+                return Sigma * v + A(cov_x(At(v)))
             
             grad = self.y - y_hat
             grad = self.solver(A=cov_y, b=grad)

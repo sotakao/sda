@@ -102,6 +102,7 @@ class UNet(nn.Module):
         stride: Union[int, Sequence[int]] = 2,
         activation: Callable[[], nn.Module] = nn.ReLU,
         spatial: int = 2,
+        periodic: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -123,6 +124,9 @@ class UNet(nn.Module):
         if type(stride) is int:
             stride = [stride] * spatial
 
+        if periodic:
+            kwargs.setdefault("padding_mode", "circular")  # periodic BCs
+            
         kwargs.update(
             kernel_size=kernel_size,
             padding=[k // 2 for k in kernel_size],

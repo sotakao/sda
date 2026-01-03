@@ -28,5 +28,6 @@ cd /resnick/groups/astuart/sotakao/score-based-ensemble-filter/sda/experiments/s
 conda activate sda
 
 # --- Run program ---
-python train.py --data_dir /central/scratch/sotakao/sqg_train_data \
-                --hrly_freq 12
+python train.py --data_dir /resnick/scratch/sotakao/sqg_train_data \
+                --hrly_freq 12 \
+                --periodic
