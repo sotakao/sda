@@ -84,7 +84,7 @@ def parse_args():
     p.add_argument("--corrections", type=int, default=1)
     p.add_argument("--tau", type=float, default=0.5)
     # Checkpoint + output
-    p.add_argument("--ckpt_path", type=str, default="")  # explicit checkpoint
+    p.add_argument("--ckpt_path", type=str, required=True)  # explicit checkpoint
     p.add_argument("--output_dir", type=str, default="./output")
     # Logging
     p.add_argument("--wandb_project", type=str, default="ScoreDA_SQG")
