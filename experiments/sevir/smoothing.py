@@ -82,7 +82,6 @@ def parse_args():
     # Logging
     p.add_argument("--wandb_project", type=str, default="ScoreDA_SQG")
     p.add_argument("--wandb_entity", type=str, default="stima")
-    p.add_argument("--plot_every", type=int, default=20)
     # Flags
     p.add_argument("--initial_condition", action="store_true", help="Add initial condition.")
     return p.parse_args()
