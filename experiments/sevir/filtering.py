@@ -1,14 +1,11 @@
 import os
 import wandb
 import argparse
-from pathlib import Path
-from typing import Tuple
-
 import numpy as np
 import torch
+from pathlib import Path
+from typing import Tuple
 from netCDF4 import Dataset as NetCDFDataset
-
-# Your modules
 from sda.score import (
     GaussianScore, VPSDE,
     DPSGaussianScore, MMPSGaussianScore,
@@ -62,7 +59,7 @@ def make_score(
 def parse_args():
     p = argparse.ArgumentParser("Run inference for SDA (parity with notebook).")
     # Data
-    p.add_argument("--data_dir", type=str, required=True)
+    p.add_argument("--data_dir", type=str, required=True)  # specify
     p.add_argument("--hrly_freq", type=int, default=3)
     p.add_argument("--val_ratio", type=float, default=0.1)
     p.add_argument("--num_workers", type=int, default=4)
@@ -80,14 +77,13 @@ def parse_args():
     p.add_argument("--corrections", type=int, default=1)
     p.add_argument("--tau", type=float, default=0.5)
     # Checkpoint + output
-    p.add_argument("--ckpt_path", type=str, required=True)  # explicit checkpoint
+    p.add_argument("--ckpt_path", type=str, required=True)  # specify
     p.add_argument("--output_dir", type=str, default="./output")
     # Logging
     p.add_argument("--wandb_project", type=str, default="ScoreDA_SQG")
     p.add_argument("--wandb_entity", type=str, default="stima")
-    p.add_argument("--plot_every", type=int, default=20)  # match assimilate.py behavior
+    p.add_argument("--plot_every", type=int, default=20)
     # Flags
-    p.add_argument("--debug_parity", action="store_true", help="Print first-step invariants and exit.")
     p.add_argument("--initial_condition", action="store_true", help="Add initial condition.")
     return p.parse_args()
 
@@ -222,8 +218,9 @@ def main():
                 name=f"SEVIR_SDA_filtering_{args.obs_pct}pct_{args.guidance_method}"
                     f"_strength{args.guidance_strength}_em_steps{args.steps}_corr{args.corrections}",
                 config=vars(args))
-    pred_t  = state.squeeze(1).detach().cpu()                        # (ens,2,H,W) in scalefact × PV
-    gt_t    = val_data[args.window-1].detach().cpu().float()  # (2,H,W)
+    
+    pred_t  = state.squeeze(1).detach().cpu()                 # (n_ens,C,H,W)
+    gt_t    = val_data[args.window-1].detach().cpu().float()  # (C,H,W)
     wandb.log({
         "RMSE": rmse(torch.mean(pred_t, dim=0), gt_t).item(),
         "CRPS": crps_ens(pred_t, gt_t, ens_dim=0).item(),
@@ -282,16 +279,16 @@ def main():
 
         # ---- Per-iteration metrics: log for time t = i + window ----
         t_idx = i + args.window - 1
-        pred_t  = state.squeeze(1).detach().cpu()                      # (ens,2,H,W)
-        gt_t    = val_data[t_idx].detach().cpu().float() # (2,H,W)            
+        pred_t  = state.squeeze(1).detach().cpu()  # (n_ens,C,H,W)
+        gt_t    = val_data[t_idx].detach().cpu().float() # (C,H,W)            
         wandb.log({
             "RMSE": rmse(torch.mean(pred_t, dim=0), gt_t).item(),
             "CRPS": crps_ens(pred_t, gt_t, ens_dim=0).item(),
             "Spread Skill Ratio": spread_skill_ratio(pred_t, gt_t, ens_dim=0).item(),
         }, step=t_idx)
 
-    filtered_states = torch.cat(filtered_states, dim=1).cpu()  # (ens, T, 2, H, W)
-    posterior_time_first = torch.swapaxes(filtered_states, 0, 1).numpy()  # (T, ens, 2, H, W)
+    filtered_states = torch.cat(filtered_states, dim=1).cpu()  # (n_ens, T, C, H, W)
+    posterior_time_first = torch.swapaxes(filtered_states, 0, 1).numpy()  # (T, n_ens, C, H, W)
 
     # ---- Save NetCDF ----
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)

@@ -2,14 +2,11 @@
 import os
 import wandb
 import argparse
-from pathlib import Path
-from typing import Tuple
-
 import numpy as np
 import torch
+from pathlib import Path
+from typing import Tuple
 from netCDF4 import Dataset as NetCDFDataset
-
-# Your modules
 from sda.score import (
     GaussianScore, VPSDE,
     DPSGaussianScore, MMPSGaussianScore,
@@ -63,7 +60,7 @@ def make_score(
 def parse_args():
     p = argparse.ArgumentParser("Run inference for SDA (parity with notebook).")
     # Data
-    p.add_argument("--data_dir", type=str, required=True)
+    p.add_argument("--data_dir", type=str, required=True)  # specify
     p.add_argument("--hrly_freq", type=int, default=3)
     p.add_argument("--val_ratio", type=float, default=0.1)
     p.add_argument("--num_workers", type=int, default=4)
@@ -81,12 +78,12 @@ def parse_args():
     p.add_argument("--corrections", type=int, default=1)
     p.add_argument("--tau", type=float, default=0.5)
     # Checkpoint + output
-    p.add_argument("--ckpt_path", type=str, required=True)  # explicit checkpoint
+    p.add_argument("--ckpt_path", type=str, required=True)  # specify
     p.add_argument("--output_dir", type=str, default="./output")
     # Logging
     p.add_argument("--wandb_project", type=str, default="ScoreDA_SQG")
     p.add_argument("--wandb_entity", type=str, default="stima")
-    p.add_argument("--plot_every", type=int, default=20)  # match assimilate.py behavior
+    p.add_argument("--plot_every", type=int, default=20)
     # Flags
     p.add_argument("--debug_parity", action="store_true", help="Print first-step invariants and exit.")
     p.add_argument("--initial_condition", action="store_true", help="Add initial condition.")
@@ -134,21 +131,31 @@ def main():
     mask = (torch.rand(H, W, device=device) < args.obs_pct).float()
     iy, ix = (mask > 0.5).nonzero(as_tuple=True)
 
-    # Condition on first in_len windows + sparse obs
-    def A(x): # Masking + initial condition
-        # x has shape (B, T, C, H, W)
-        B, L, C, H, W = x.shape
-        return torch.concatenate([x[:, :args.in_len].flatten(start_dim=1), # Identity map on t=0:5 to impose initial condition
-                                  x[:, args.in_len:, :, iy, ix].reshape(B,-1) # Sparse observations for t > 5
-                                 ], dim=1)
+    if args.initial_condition:
+        # Condition on first in_len windows + sparse obs
+        def A(x): # Masking + initial condition
+            # x has shape (B, T, C, H, W)
+            B, L, C, H, W = x.shape
+            return torch.concatenate([x[:, :args.in_len].flatten(start_dim=1), # Identity map on t=0:in_len to impose initial condition
+                                    x[:, args.in_len:, :, iy, ix].reshape(B,-1) # Sparse observations for t > in_len
+                                    ], dim=1)
 
-    # Get noisy observation
-    y = A(val_data[None])
-    obs_sigma_full = args.obs_sigma * torch.ones_like(y)
-    N = H*W*args.in_len
-    obs_sigma_full[:, :N] = args.init_sigma**2
-    eps_full = torch.randn_like(y)              # fixed noise reused by prefixing
-    y = y + obs_sigma_full * eps_full
+        # Get noisy observation
+        y = A(val_data[None])
+        obs_sigma_full = args.obs_sigma * torch.ones_like(y)
+        N = H*W*args.in_len
+        obs_sigma_full[:, :N] = args.init_sigma**2
+        eps_full = torch.randn_like(y)              # fixed noise reused by prefixing
+        y = y + obs_sigma_full * eps_full
+    else:
+        def A(x): # Masking + initial condition
+            # x has shape (B, T, C, H, W)
+            B, L, C, H, W = x.shape
+            return x[:, :, :, iy, ix].reshape(B,-1)
+        
+        y = A(val_data[None])
+        eps_full = torch.randn_like(y)
+        y = y + args.obs_sigma * eps_full
 
     # Load score model
     ckpt = torch.load(args.ckpt_path, map_location=device)
@@ -219,7 +226,7 @@ def main():
         if device == "cuda":
             torch.cuda.empty_cache()
 
-    posterior_time_first = torch.stack(posterior_list, dim=1).numpy()  # (T, ens, C, H, W)
+    posterior_time_first = torch.stack(posterior_list, dim=1).numpy()  # (T, n_ens, C, H, W)
 
     # Save NetCDF
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
@@ -252,12 +259,6 @@ def main():
             "Spread Skill Ratio": spread_skill_ratio(pred_t, gt_t, ens_dim=0).item(),
         }, step=t)
 
-        # # Save spectrum exactly like assimilate.py and log to WandB media
-        # if t % args.plot_every == 0:
-        #     fname = save_spectrum(pred_t, gt_t.unsqueeze(0), time=t)
-        #     wandb.log({"spectrum": wandb.Image(fname)}, step=t)
-
-    # (optional) visuals
     vid_path = save_video(
         torch.tensor(posterior_time_first).float().cpu(),             # (T,ens,2,H,W)
         (val_data.clone().detach().float()).cpu(),       # (T,C,H,W)

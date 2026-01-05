@@ -1,16 +1,12 @@
-#!/usr/bin/env python
 import os
+import wandb
 import argparse
-from types import SimpleNamespace
-from pathlib import Path
-from typing import Tuple
-
 import numpy as np
 import torch
+from pathlib import Path
+from typing import Tuple
 from torch import Tensor
 from netCDF4 import Dataset as NetCDFDataset
-
-# Your modules
 from sda.score import (
     GaussianScore, ScaledVPSDE,
     DPSGaussianScore, MMPSGaussianScore,
@@ -64,9 +60,7 @@ def make_score(
 def parse_args():
     p = argparse.ArgumentParser("Run inference for SDA (parity with notebook).")
     # Data
-    p.add_argument("--data_dir", type=str, required=True)
-    p.add_argument("--train_file", type=str, default="sqg_pv_train.h5")
-    p.add_argument("--hrly_freq", type=int, default=3)
+    p.add_argument("--val_file", type=str, required=True)
     # Model
     p.add_argument("--window", type=int, default=5)
     p.add_argument("--embedding", type=int, default=64)
@@ -91,15 +85,12 @@ def parse_args():
     p.add_argument("--tau", type=float, default=0.5)
     # Checkpoint + output
     p.add_argument("--ckpt_path", type=str, default="")  # explicit checkpoint
-    p.add_argument("--ckpt_dir", type=str, default="../../runs_sqg")  # fallback root
     p.add_argument("--output_dir", type=str, default="./output")
     # Logging
-    p.add_argument("--log_wandb", type=int, default=1)
     p.add_argument("--wandb_project", type=str, default="ScoreDA_SQG")
     p.add_argument("--wandb_entity", type=str, default="stima")
     p.add_argument("--plot_every", type=int, default=20)  # match assimilate.py behavior
     # Flags
-    p.add_argument("--debug_parity", action="store_true", help="Print first-step invariants and exit.")
     p.add_argument("--initial_condition", action="store_true", help="Add initial condition.")
     return p.parse_args()
 
@@ -108,29 +99,23 @@ def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.set_default_dtype(torch.float32)
-
-    # (Optional) reproducibility
     torch.manual_seed(0); np.random.seed(0)
-    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    rng = np.random.RandomState(42)
 
-    # ---- Defaults matching your notebook ----
     pv_mean = torch.as_tensor(0.0, device=device, dtype=torch.float32)
     pv_std  = torch.as_tensor(2672.232, device=device, dtype=torch.float32)
 
     obs_fn = OBS_FNS[args.obs_fn]
-    rng = np.random.RandomState(42)
 
     # ---- Data ----
-    # test_file = Path(args.data_dir) / f"{args.hrly_freq}hrly" / f"sqg_N64_{args.hrly_freq}hrly_100.nc"
-    test_file = f"/resnick/groups/astuart/sotakao/score-based-ensemble-filter/EnSFInpainting/data/test/sqg_N64_{args.hrly_freq}hrly_100.nc"
-    nc_truth = NetCDFDataset(test_file, 'r')
+    nc_truth = NetCDFDataset(args.val_file, 'r')
     pv_truth_nc = nc_truth.variables['pv']  # (T, 2, ny, nx)
     T, Z, ny, nx = pv_truth_nc.shape
     pv_truth = torch.tensor(np.array(pv_truth_nc[:T, ...]), dtype=torch.float32, device=device)
     scalefact = nc_truth.f * nc_truth.theta0 / nc_truth.g
     nc_truth.close()
 
-    # ---- Mask (same logic) ----
+    # ---- Mask ----
     def make_obs_mask(ny_, nx_):
         if args.obs_type == "grid":
             stride = args.obs_stride
@@ -145,19 +130,10 @@ def main():
         return mask
 
     obs_mask = make_obs_mask(ny, nx)                       # (ny, nx)
-    iy, ix = (obs_mask > 0.5).nonzero(as_tuple=True)    
-    # mask4d = obs_mask.repeat(T-1, 2, ny, nx)                   # broadcast over (B,L,C)
+    iy, ix = (obs_mask > 0.5).nonzero(as_tuple=True)    # indices of observed points
 
     # ---- Checkpoint ----
-    if args.ckpt_path:
-        ckpt_path = Path(args.ckpt_path)
-    else:
-        ckpt_dir = Path(args.ckpt_dir) / f"mcscore_vpsde_sqg_window_{args.window}" / "checkpoints"
-        files = sorted(ckpt_dir.glob("epoch_*.pt"))
-        if not files:
-            raise FileNotFoundError(f"No checkpoint files found in {ckpt_dir}.")
-        ckpt_path = files[-1]
-    payload = torch.load(ckpt_path, map_location=device)
+    payload = torch.load(args.ckpt_path, map_location=device)
 
     # ---- Build model (same as notebook) ----
     CONFIG = dict(
@@ -173,10 +149,6 @@ def main():
     score_obj.load_state_dict(payload["score_state"])
 
     # ---- A(x): PHYSICAL -> OBS (mask applied framewise) ----
-    # def A_model(x):
-    #     # x: (B,L,C,H,W) in temperature units (scalefact × PV)
-    #     return obs_fn(x) * mask4d
-
     if args.initial_condition:
         def A_model(x):
             # expects x: (B,L,C,H,W) in temperature units (scalefact × PV)
@@ -187,10 +159,6 @@ def main():
             obs_part = obs_fn(x_obs_vec)
 
             return torch.cat([ic_vec, obs_part], dim=1)
-
-        # ---- Observations in OBS units (masked) ----
-        # noise  = torch.randn_like(pv_truth) * args.obs_sigma
-        # y_star = obs_fn(scalefact * pv_truth) * obs_mask + noise * obs_mask  # (T,2,H,W)
 
         x_phys_full = (scalefact * pv_truth).unsqueeze(0)      # (1,T,2,H,W)
         y_clean_full = A_model(x_phys_full)                    # (1, M_full)
@@ -260,25 +228,6 @@ def main():
         shape=(T, Z, ny, nx),
     ).to(device)
 
-    # ---- Parity probe (prints invariants) ----
-    if args.debug_parity:
-        with torch.no_grad():
-            B = 1
-            x0 = (torch.randn(B, T, Z, ny, nx, device=device) * scale)
-            time = torch.linspace(1, 0, args.steps + 1, device=device)
-            t0, dt = time[0], 1.0 / args.steps
-            r    = guided_sde.mu(t0 - dt) / guided_sde.mu(t0)
-            eps0 = guided_sde.eps(x0, t0, c=None)
-            x1   = r * x0 + (guided_sde.sigma(t0 - dt) - r * guided_sde.sigma(t0)) * eps0
-
-            print("DEBUG invariants:")
-            print("  scale:", float(scale))
-            print("  mu0, sigma0:", float(guided_sde.mu(t0)), float(guided_sde.sigma(t0)))
-            print("  ||eps0||, ||x1 - r*x0||:", float(eps0.norm()), float((x1 - r*x0).norm()))
-            print("  A(x0) mean:", float(A_model(x0).abs().mean()))
-            print("  y mean:", float(y_star.abs().mean()))
-        return
-
     # ---- Sampling ----
     posterior_list = []
     for e in range(args.n_ens):
@@ -306,46 +255,33 @@ def main():
     nc.sync(); nc.close()
 
     # ---- Metrics (PV units): divide by scalefact to convert from physical ----
-    if args.log_wandb:
-        import wandb
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity,
-                   name=f"SDA_{args.obs_fn}_{args.obs_pct}pct_{args.guidance_method}"
-                        f"_strength{args.guidance_strength}_em_steps{args.steps}_corr{args.corrections}",
-                   config=vars(args))
+    wandb.init(project=args.wandb_project, entity=args.wandb_entity,
+                name=f"SDA_smoothing_{args.obs_fn}_{args.obs_pct}pct_{args.guidance_method}"
+                    f"_strength{args.guidance_strength}_em_steps{args.steps}_corr{args.corrections}",
+                config=vars(args))
 
-        for t in range(T):
-            pred_t  = torch.tensor(posterior_time_first[t]).float()   # (ens,2,H,W) in scalefact × PV
-            gt_t    = (scalefact * pv_truth[t].detach().cpu().float())  # (2,H,W)
+    for t in range(T):
+        pred_t  = torch.tensor(posterior_time_first[t]).float()   # (ens,2,H,W) in scalefact × PV
+        gt_t    = (scalefact * pv_truth[t].detach().cpu().float())  # (2,H,W)
 
-            wandb.log({
-                "RMSE": rmse(torch.mean(pred_t, dim=0), gt_t).item(),
-                "CRPS": crps_ens(pred_t, gt_t, ens_dim=0).item(),
-                "Spread Skill Ratio": spread_skill_ratio(pred_t, gt_t, ens_dim=0).item(),
-            }, step=t)
+        wandb.log({
+            "RMSE": rmse(torch.mean(pred_t, dim=0), gt_t).item(),
+            "CRPS": crps_ens(pred_t, gt_t, ens_dim=0).item(),
+            "Spread Skill Ratio": spread_skill_ratio(pred_t, gt_t, ens_dim=0).item(),
+        }, step=t)
 
-            # Save spectrum exactly like assimilate.py and log to WandB media
-            if t % args.plot_every == 0:
-                fname = save_spectrum(pred_t, gt_t.unsqueeze(0), time=t)
-                wandb.log({"spectrum": wandb.Image(fname)}, step=t)
+        # Save spectrum exactly like assimilate.py and log to WandB media
+        if t % args.plot_every == 0:
+            fname = save_spectrum(pred_t, gt_t.unsqueeze(0), time=t)
+            wandb.log({"spectrum": wandb.Image(fname)}, step=t)
 
-        # (optional) visuals
-        vid_path = save_video(
-            torch.tensor(posterior_time_first).float().cpu(),             # (T,ens,2,H,W)
-            (scalefact * pv_truth.clone().detach().float()).cpu(),       # (T,2,H,W)
-            args.obs_sigma, args.obs_pct, obs_fn=obs_fn, level=0
-        )
-        wandb.log({"animation": wandb.Video(vid_path, fps=10, format="mp4")})
-        wandb.finish()
-    else:
-        pred_pv = torch.tensor(posterior_time_first).float() / float(scalefact)  # (T, ens, 2, H, W)
-        ens_mean = pred_pv.mean(dim=1)                                           # (T, 2, H, W)
-        gt       = pv_truth.detach().cpu().float()                               # (T, 2, H, W)
-
-        # If rmse() returns per-time values (e.g., shape (T,) or (T,2)), average them:
-        rmse_t   = rmse(ens_mean, gt)            # tensor, not a scalar
-        rmse_all = rmse_t.mean().item()          # make it a scalar
-
-        print(f"RMSE(all): {rmse_all:.4f}")
+    vid_path = save_video(
+        torch.tensor(posterior_time_first).float().cpu(),             # (T,ens,2,H,W)
+        (scalefact * pv_truth.clone().detach().float()).cpu(),       # (T,2,H,W)
+        args.obs_sigma, args.obs_pct, obs_fn=obs_fn, level=0
+    )
+    wandb.log({"animation": wandb.Video(vid_path, fps=10, format="mp4")})
+    wandb.finish()
 
 
 if __name__ == "__main__":
