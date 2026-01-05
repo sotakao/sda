@@ -61,7 +61,6 @@ def parse_args():
     p = argparse.ArgumentParser("Run inference for SDA (parity with notebook).")
     # Data
     p.add_argument("--data_dir", type=str, required=True)  # specify
-    p.add_argument("--hrly_freq", type=int, default=3)
     p.add_argument("--val_ratio", type=float, default=0.1)
     p.add_argument("--num_workers", type=int, default=4)
     # Obs + guidance
@@ -85,7 +84,6 @@ def parse_args():
     p.add_argument("--wandb_entity", type=str, default="stima")
     p.add_argument("--plot_every", type=int, default=20)
     # Flags
-    p.add_argument("--debug_parity", action="store_true", help="Print first-step invariants and exit.")
     p.add_argument("--initial_condition", action="store_true", help="Add initial condition.")
     return p.parse_args()
 

@@ -60,7 +60,6 @@ def parse_args():
     p = argparse.ArgumentParser("Run inference for SDA (parity with notebook).")
     # Data
     p.add_argument("--data_dir", type=str, required=True)  # specify
-    p.add_argument("--hrly_freq", type=int, default=3)
     p.add_argument("--val_ratio", type=float, default=0.1)
     p.add_argument("--num_workers", type=int, default=4)
     # Obs + guidance
