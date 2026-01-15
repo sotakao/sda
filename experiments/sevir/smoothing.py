@@ -15,6 +15,9 @@ from sda.score import (
 from utils import ACTIVATIONS, SEVIRLightningDataModule, save_video
 from metrics import rmse, crps_ens, spread_skill_ratio
 
+from datetime import datetime
+import uuid
+
 
 class LocalScoreUNet(ScoreUNet):
     """Score U-Net with forcing channel (matches your training)."""
@@ -28,7 +31,7 @@ class LocalScoreUNet(ScoreUNet):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, c: torch.Tensor = None) -> torch.Tensor:
         return super().forward(x, t, self.forcing)
-    
+
 
 def make_score(
     size: int,
@@ -58,7 +61,8 @@ def make_score(
 
 
 def parse_args():
-    p = argparse.ArgumentParser("Run inference for SDA (parity with notebook).")
+    p = argparse.ArgumentParser(
+        "Run inference for SDA (parity with notebook).")
     # Data
     p.add_argument("--data_dir", type=str, required=True)  # specify
     p.add_argument("--val_ratio", type=float, default=0.1)
@@ -70,7 +74,8 @@ def parse_args():
     p.add_argument("--init_sigma", type=float, default=0.001)
     p.add_argument("--fixed_obs", action="store_true")
     p.add_argument("--n_ens", type=int, default=20)
-    p.add_argument("--guidance_method", type=str, choices=["DPS", "DPS_scale", "MMPS"], default="DPS")
+    p.add_argument("--guidance_method", type=str,
+                   choices=["DPS", "DPS_scale", "MMPS"], default="DPS")
     p.add_argument("--guidance_strength", type=float, default=1.0)
     p.add_argument("--gamma", type=float, default=1e-2)
     p.add_argument("--steps", type=int, default=100)
@@ -83,7 +88,12 @@ def parse_args():
     p.add_argument("--wandb_project", type=str, default="ScoreDA_SQG")
     p.add_argument("--wandb_entity", type=str, default="stima")
     # Flags
-    p.add_argument("--initial_condition", action="store_true", help="Add initial condition.")
+    p.add_argument("--initial_condition", action="store_true",
+                   help="Add initial condition.")
+    p.add_argument('--data_index', type=int, default=0,
+                   help='Index of the data sample to use for assimilation')
+    p.add_argument('--start_time', type=int, default=0,
+                   help='Start time index for assimilation (default: 0)')
     return p.parse_args()
 
 
@@ -93,35 +103,39 @@ def main():
     torch.set_default_dtype(torch.float32)
 
     # reproducibility
-    torch.manual_seed(0); np.random.seed(0)
+    torch.manual_seed(0)
+    np.random.seed(0)
 
     dm = SEVIRLightningDataModule(
-            seq_len=25,
-            sample_mode='sequent',
-            stride=6,
-            batch_size=50,
-            layout='NTCHW',
-            output_type=np.float32,
-            preprocess=True,
-            rescale_method="01",
-            verbose=False,
-            aug_mode='2',
-            ret_contiguous=False,
-            # datamodule_only
-            dataset_name='sevirlr',
-            start_date=None,
-            train_test_split_date=[2019, 6, 1],
-            end_date=None,
-            val_ratio=args.val_ratio,
-            num_workers=args.num_workers,
-            sevir_dir = args.data_dir,
-             )
+        seq_len=25,
+        sample_mode='sequent',
+        stride=6,
+        batch_size=50,
+        layout='NTCHW',
+        output_type=np.float32,
+        preprocess=True,
+        rescale_method="01",
+        verbose=False,
+        aug_mode='0',  # NOTE: No augmentation on the data
+        ret_contiguous=False,
+        # datamodule_only
+        dataset_name='sevirlr',
+        start_date=None,
+        train_test_split_date=[2019, 6, 1],
+        end_date=None,
+        val_ratio=args.val_ratio,
+        num_workers=args.num_workers,
+        sevir_dir=args.data_dir,
+    )
     dm.setup()
 
     train_loader, val_loader = dm.train_dataloader(), dm.val_dataloader()
 
-    val_data = val_loader.dataset[3]
-    val_data = torch.tensor(val_data, device=device)
+    # NOTE: To ensure we use the same validation samples as in the other experiments
+    ns = [9, 10, 28, 49, 58, 59, 60, 81, 91, 96]
+    val_data = val_loader.dataset[ns[args.data_index]]
+
+    val_data = torch.tensor(val_data, device=device)[args.start_time:]
     T, C, H, W = val_data.shape
 
     # Create observation mask and corresponding indices
@@ -130,26 +144,29 @@ def main():
 
     if args.initial_condition:
         # Condition on first in_len windows + sparse obs
-        def A(x): # Masking + initial condition
+        def A(x):  # Masking + initial condition
             # x has shape (B, T, C, H, W)
             B, L, C, H, W = x.shape
-            return torch.concatenate([x[:, :args.in_len].flatten(start_dim=1), # Identity map on t=0:in_len to impose initial condition
-                                    x[:, args.in_len:, :, iy, ix].reshape(B,-1) # Sparse observations for t > in_len
-                                    ], dim=1)
+            return torch.concatenate([x[:, :args.in_len].flatten(start_dim=1),  # Identity map on t=0:in_len to impose initial condition
+                                      # Sparse observations for t > in_len
+                                      x[:, args.in_len:, :, iy,
+                                          ix].reshape(B, -1)
+                                      ], dim=1)
 
         # Get noisy observation
         y = A(val_data[None])
         obs_sigma_full = args.obs_sigma * torch.ones_like(y)
         N = H*W*args.in_len
         obs_sigma_full[:, :N] = args.init_sigma**2
-        eps_full = torch.randn_like(y)              # fixed noise reused by prefixing
+        # fixed noise reused by prefixing
+        eps_full = torch.randn_like(y)
         y = y + obs_sigma_full * eps_full
     else:
-        def A(x): # Masking + initial condition
+        def A(x):  # Masking + initial condition
             # x has shape (B, T, C, H, W)
             B, L, C, H, W = x.shape
-            return x[:, :, :, iy, ix].reshape(B,-1)
-        
+            return x[:, :, :, iy, ix].reshape(B, -1)
+
         y = A(val_data[None])
         eps_full = torch.randn_like(y)
         y = y + args.obs_sigma * eps_full
@@ -218,46 +235,55 @@ def main():
     posterior_list = []
     for e in range(args.n_ens):
         print(f"Sampling ensemble member {e+1}/{args.n_ens}...")
-        sample = guided_sde.sample((1,), steps=args.steps, corrections=args.corrections, tau=args.tau)
+        sample = guided_sde.sample(
+            (1,), steps=args.steps, corrections=args.corrections, tau=args.tau)
         posterior_list.append(sample.squeeze(0).detach().cpu())  # (T,C,H,W)
         if device == "cuda":
             torch.cuda.empty_cache()
 
-    posterior_time_first = torch.stack(posterior_list, dim=1).numpy()  # (T, n_ens, C, H, W)
+    posterior_time_first = torch.stack(
+        posterior_list, dim=1).numpy()  # (T, n_ens, C, H, W)
 
     # Save NetCDF
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    nc_filename = Path(args.output_dir) / "inference_results.nc"
+    random_id = str(uuid.uuid4())[:4]  # Use first 4 characters of UUID
+    timestamp = datetime.now().strftime("%m_%d_%H")
+    file_name = f"SDAsmoothingINIT{args.start_time}_SEVIR_run_{args.data_index}_{timestamp}_{random_id}"
+    nc_filename = Path(args.output_dir) / f"{file_name}.nc"
     nc = NetCDFDataset(nc_filename, mode="w", format="NETCDF4_CLASSIC")
     nc.createDimension("x", W)
     nc.createDimension("y", H)
     nc.createDimension("z", C)
     nc.createDimension("t", T)
     nc.createDimension("ens", args.n_ens)
-    ground_truth = nc.createVariable("ground_truth", np.float32, ("t", "z", "y", "x"), zlib=True)
-    x_assim      = nc.createVariable("x_assim",      np.float32, ("t", "ens", "z", "y", "x"), zlib=True)
+    ground_truth = nc.createVariable(
+        "ground_truth", np.float32, ("t", "z", "y", "x"), zlib=True)
+    x_assim = nc.createVariable(
+        "x_assim",      np.float32, ("t", "ens", "z", "y", "x"), zlib=True)
     ground_truth[:] = val_data.cpu().numpy()
-    x_assim[:]      = posterior_time_first
-    nc.sync(); nc.close()
+    x_assim[:] = posterior_time_first
+    nc.sync()
+    nc.close()
 
     # Log metrics and visuals
     wandb.init(project=args.wandb_project, entity=args.wandb_entity,
-                name=f"SEVIR_SDA_smoothing_{args.obs_pct}pct_{args.guidance_method}"
-                    f"_strength{args.guidance_strength}_em_steps{args.steps}_corr{args.corrections}",
-                config=vars(args))
+               name=f"SEVIR_SDA_smoothing_{args.obs_pct}pct_{args.guidance_method}"
+               f"_strength{args.guidance_strength}_em_steps{args.steps}_corr{args.corrections}_run_{args.data_index}",
+               config=vars(args))
 
     for t in range(T):
-        pred_t  = torch.tensor(posterior_time_first[t]).float()   # (ens,C,H,W)
-        gt_t    = (val_data[t].detach().cpu().float())  # (C,H,W)
+        pred_t = torch.tensor(posterior_time_first[t]).float()   # (ens,C,H,W)
+        gt_t = (val_data[t].detach().cpu().float())  # (C,H,W)
 
         wandb.log({
             "RMSE": rmse(torch.mean(pred_t, dim=0), gt_t).item(),
             "CRPS": crps_ens(pred_t, gt_t, ens_dim=0).item(),
             "Spread Skill Ratio": spread_skill_ratio(pred_t, gt_t, ens_dim=0).item(),
-        }, step=t)
+        }, step=t+args.start_time)
 
     vid_path = save_video(
-        torch.tensor(posterior_time_first).float().cpu(),             # (T,ens,2,H,W)
+        torch.tensor(posterior_time_first).float(
+        ).cpu(),             # (T,ens,2,H,W)
         (val_data.clone().detach().float()).cpu(),       # (T,C,H,W)
         args.obs_sigma, args.obs_pct, obs_fn=lambda x: x, level=0
     )
@@ -267,5 +293,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
-
