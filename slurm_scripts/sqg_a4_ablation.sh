@@ -45,7 +45,7 @@ cd /resnick/groups/astuart/sotakao/score-based-ensemble-filter/sda/experiments/s
 #   steps_idx= (a / 5) % 3
 #   corr_idx = (a / (5*3)) % 3
 
-GUIDES=(0.1 0.5 1.0 3.0 5.0)
+GUIDES=(0.1 0.5 1.0 5.0 10.0)
 STEPSS=(100 250 500)
 CORRS=(1 2)
 
@@ -85,7 +85,7 @@ srun python smoothing.py\
     --obs_fn square_scaled \
     --obs_sigma 1.0 \
     --init_sigma 1.0 \
-    --n_ens 20 \
+    --n_ens 4 \
     --corrections "${CORRECTIONS}" \
     --steps "${STEPS}" \
     --guidance_method MMPS \
