@@ -157,7 +157,7 @@ def main():
         y = A(val_data[None])
         obs_sigma_full = args.obs_sigma * torch.ones_like(y)
         N = H*W*args.in_len
-        obs_sigma_full[:, :N] = args.init_sigma**2
+        obs_sigma_full[:, :N] = args.init_sigma  # **2
         # fixed noise reused by prefixing
         eps_full = torch.randn_like(y)
         y = y + obs_sigma_full * eps_full

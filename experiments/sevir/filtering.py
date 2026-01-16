@@ -184,7 +184,7 @@ def main():
     y = A(val_data[None])
     obs_sigma_full = args.obs_sigma * torch.ones_like(y)
     N = H*W  # NOTE: Could add the window -1 here.
-    obs_sigma_full[:, :N] = args.init_sigma**2
+    obs_sigma_full[:, :N] = args.init_sigma  # **2
     eps_full = torch.randn_like(y)
     y = y + obs_sigma_full * eps_full
 
